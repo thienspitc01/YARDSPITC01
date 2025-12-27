@@ -25,17 +25,21 @@ export const syncTable = async (tableName: string, id: string, data: any) => {
   if (error) console.error(`Sync error on ${tableName}:`, error);
 };
 
-export const fetchTableData = async (tableName: string) => {
+export const fetchTableData = async (tableName: string, returnFullRow: boolean = false) => {
   if (!supabase) return [];
+  // Increase limit for yard containers to ensure all batches are fetched
   const { data, error } = await supabase
     .from(tableName)
-    .select('data')
+    .select(returnFullRow ? 'id, data' : 'data')
+    .limit(1000)
     .order('updated_at', { ascending: false });
   
   if (error) {
     console.error(`Fetch error on ${tableName}:`, error);
     return [];
   }
+  
+  if (returnFullRow) return data;
   return data.map(item => item.data);
 };
 
@@ -48,9 +52,7 @@ export const subscribeToChanges = (tableName: string, callback: (payload: any) =
       'postgres_changes',
       { event: '*', schema: 'public', table: tableName },
       (payload) => {
-        if (payload.new && payload.new.data) {
-          callback(payload.new.data);
-        }
+          callback(payload);
       }
     )
     .subscribe();
