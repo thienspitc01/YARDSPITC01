@@ -1,3 +1,4 @@
+
 {
   "name": "container-yard-viewer",
   "private": true,
@@ -10,7 +11,9 @@
   },
   "dependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "@supabase/supabase-js": "^2.45.0",
+    "@google/genai": "^1.34.0"
   },
   "devDependencies": {
     "@types/node": "^20.12.7",
