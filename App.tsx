@@ -13,6 +13,7 @@ import GateForm from './components/GateForm';
 import YardDashboard from './components/YardDashboard';
 import LoginForm from './components/LoginForm';
 import { startAlarm, stopAlarm } from './services/audioService';
+import { requestNotificationPermission, sendNotification } from './services/notificationService';
 import { initSupabase, syncTable, fetchTableData, subscribeToChanges, CloudConfig, getSupabase } from './services/supabaseService';
 
 const STORAGE_KEYS = {
@@ -103,6 +104,11 @@ const App: React.FC = () => {
 
   const [mode, setMode] = useState<AppMode>('VIEWER');
 
+  // Request Notification Permission on Mount
+  useEffect(() => {
+    requestNotificationPermission();
+  }, []);
+
   // Sync mode with role: Gate Staff is forced into GATE mode
   useEffect(() => {
     if (user?.role === 'GATE') {
@@ -124,6 +130,10 @@ const App: React.FC = () => {
   const containers = useMemo(() => {
     return Object.values(containerBatches).flat();
   }, [containerBatches]);
+
+  // Track the last known count of pending/assigned requests to trigger notifications once
+  const lastPendingCount = useRef(0);
+  const lastAssignedCount = useRef(0);
 
   // Supabase & Local Init
   useEffect(() => {
@@ -224,15 +234,30 @@ const App: React.FC = () => {
     }
   }, [blockConfigs, requests, schedule, containers, isCloudConnected]);
 
-  // Alarms
+  // Alarms & Push Notifications
   useEffect(() => {
     if (!user) return;
     let shouldAlarm = false;
-    if (mode === 'YARD') {
-      shouldAlarm = requests.some(r => r.status === 'pending' && !r.acknowledgedByYard);
-    } else if (mode === 'GATE') {
-      shouldAlarm = requests.some(r => r.status === 'assigned' && !r.acknowledgedByGate);
+    
+    const pendingReqs = requests.filter(r => r.status === 'pending' && !r.acknowledgedByYard);
+    const assignedReqs = requests.filter(r => r.status === 'assigned' && !r.acknowledgedByGate);
+
+    if (user.role === 'PLANNER' && mode === 'YARD') {
+      shouldAlarm = pendingReqs.length > 0;
+      if (pendingReqs.length > lastPendingCount.current) {
+        sendNotification("Có yêu cầu xin vị trí mới!", `Bạn có ${pendingReqs.length} container đang chờ cấp vị trí.`);
+      }
+    } else if (user.role === 'GATE' || mode === 'GATE') {
+      shouldAlarm = assignedReqs.length > 0;
+      if (assignedReqs.length > lastAssignedCount.current) {
+        const lastAssigned = assignedReqs[assignedReqs.length - 1];
+        sendNotification("Đã có vị trí hạ bãi!", `Container tàu ${lastAssigned.vesselName} hạ tại ${lastAssigned.assignedLocation}`);
+      }
     }
+
+    lastPendingCount.current = pendingReqs.length;
+    lastAssignedCount.current = assignedReqs.length;
+
     if (shouldAlarm) startAlarm(); else stopAlarm();
   }, [requests, mode, user]);
 
