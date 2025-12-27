@@ -1,17 +1,17 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Container, ParseStats, BlockConfig, BlockStats, RTG_BLOCK_NAMES, AppMode, ContainerRequest, ScheduleData, PlanningSettings } from './types';
+import { Container, ParseStats, BlockConfig, BlockStats, RTG_BLOCK_NAMES, AppMode, ContainerRequest, ScheduleData, User } from './types';
 import { parseExcelFile } from './services/excelService';
 import FileUpload from './components/FileUpload';
 import YardRowView from './components/YardRowView';
 import HeapBlockView from './components/HeapBlockView';
-import BlockConfigurator from './components/BlockConfigurator';
 import VesselStatistics from './components/VesselStatistics';
 import YardStatistics from './components/YardStatistics';
 import DwellTimeStatistics from './components/DwellTimeStatistics';
 import Layout from './components/Layout';
 import GateForm from './components/GateForm';
 import YardDashboard from './components/YardDashboard';
+import LoginForm from './components/LoginForm';
 import { startAlarm, stopAlarm } from './services/audioService';
 import { initSupabase, syncTable, fetchTableData, subscribeToChanges, CloudConfig, getSupabase } from './services/supabaseService';
 
@@ -23,7 +23,8 @@ const STORAGE_KEYS = {
   REQUESTS: 'port_requests_v1',
   SCHEDULE: 'yard_schedule_data_v1',
   PLANNING_SETTINGS: 'planning_settings_v19',
-  CLOUD_CONFIG: 'yard_cloud_config_v1'
+  CLOUD_CONFIG: 'yard_cloud_config_v1',
+  USER: 'yard_active_user_v1'
 };
 
 const getMachineType = (name: string): 'RTG' | 'RS' => {
@@ -95,7 +96,20 @@ const DEFAULT_BLOCKS: BlockConfig[] = [
 });
 
 const App: React.FC = () => {
+  const [user, setUser] = useState<User | null>(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.USER);
+    return saved ? JSON.parse(saved) : null;
+  });
+
   const [mode, setMode] = useState<AppMode>('VIEWER');
+
+  // Sync mode with role: Gate Staff is forced into GATE mode
+  useEffect(() => {
+    if (user?.role === 'GATE') {
+      setMode('GATE');
+    }
+  }, [user]);
+
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.CLOUD_CONFIG);
     return saved ? JSON.parse(saved) : null;
@@ -103,17 +117,15 @@ const App: React.FC = () => {
   const [isCloudConnected, setIsCloudConnected] = useState(false);
 
   const [requests, setRequests] = useState<ContainerRequest[]>([]);
-  // Use a map to store container batches to efficiently handle partial updates
   const [containerBatches, setContainerBatches] = useState<Record<string, Container[]>>({});
   const [schedule, setSchedule] = useState<ScheduleData[]>([]);
   const [blockConfigs, setBlockConfigs] = useState<BlockConfig[]>(DEFAULT_BLOCKS);
 
-  // Compute flattened containers array from batches
   const containers = useMemo(() => {
     return Object.values(containerBatches).flat();
   }, [containerBatches]);
 
-  // Initialize Supabase and Subscriptions
+  // Supabase & Local Init
   useEffect(() => {
     if (cloudConfig) {
       const client = initSupabase(cloudConfig);
@@ -121,7 +133,6 @@ const App: React.FC = () => {
         setIsCloudConnected(true);
         localStorage.setItem(STORAGE_KEYS.CLOUD_CONFIG, JSON.stringify(cloudConfig));
         
-        // Initial Fetch
         const loadCloudData = async () => {
           const cloudRequests = await fetchTableData('yard_requests');
           if (cloudRequests.length > 0) setRequests(cloudRequests);
@@ -129,7 +140,7 @@ const App: React.FC = () => {
           const cloudSchedule = await fetchTableData('yard_schedule');
           if (cloudSchedule.length > 0) setSchedule(cloudSchedule);
           
-          const cloudContainerRows = await fetchTableData('yard_containers', true); // Pass true to get raw rows with IDs
+          const cloudContainerRows = await fetchTableData('yard_containers', true);
           if (cloudContainerRows.length > 0) {
               const batches: Record<string, Container[]> = {};
               cloudContainerRows.forEach((row: any) => {
@@ -140,7 +151,6 @@ const App: React.FC = () => {
         };
         loadCloudData();
 
-        // Subscriptions
         const reqSub = subscribeToChanges('yard_requests', (payload) => {
           const data = payload.new.data;
           setRequests(prev => {
@@ -183,7 +193,6 @@ const App: React.FC = () => {
         };
       }
     } else {
-        // Fallback to local storage if no cloud
         const r = localStorage.getItem(STORAGE_KEYS.REQUESTS);
         if (r) setRequests(JSON.parse(r));
         const c = localStorage.getItem(STORAGE_KEYS.CONTAINERS);
@@ -205,7 +214,7 @@ const App: React.FC = () => {
   const [vessels, setVessels] = useState<string[]>([]);
   const [selectedVessels, setSelectedVessels] = useState<string[]>(['', '', '']);
 
-  // Sync to Local
+  // Local Sync
   useEffect(() => {
     if (!isCloudConnected) {
       localStorage.setItem(STORAGE_KEYS.BLOCK_CONFIGS, JSON.stringify(blockConfigs));
@@ -215,8 +224,9 @@ const App: React.FC = () => {
     }
   }, [blockConfigs, requests, schedule, containers, isCloudConnected]);
 
-  // Sync chuông báo động
+  // Alarms
   useEffect(() => {
+    if (!user) return;
     let shouldAlarm = false;
     if (mode === 'YARD') {
       shouldAlarm = requests.some(r => r.status === 'pending' && !r.acknowledgedByYard);
@@ -224,7 +234,18 @@ const App: React.FC = () => {
       shouldAlarm = requests.some(r => r.status === 'assigned' && !r.acknowledgedByGate);
     }
     if (shouldAlarm) startAlarm(); else stopAlarm();
-  }, [requests, mode]);
+  }, [requests, mode, user]);
+
+  const handleLogin = (newUser: User) => {
+    setUser(newUser);
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(newUser));
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem(STORAGE_KEYS.USER);
+    stopAlarm();
+  };
 
   const handleGateSubmit = (data: Omit<ContainerRequest, 'id' | 'status' | 'timestamp'>) => {
     const newRequest: ContainerRequest = {
@@ -239,10 +260,6 @@ const App: React.FC = () => {
     if (isCloudConnected) syncTable('yard_requests', newRequest.id, newRequest);
   };
 
-  /**
-   * Updates a request with an assigned location.
-   * Explicitly casts 'status' to the union literal type to prevent widening to string.
-   */
   const handleYardAssign = (requestId: string, location: string) => {
     setRequests(prev => {
       const updated = prev.map(req => 
@@ -276,15 +293,11 @@ const App: React.FC = () => {
     setIsLoading(true);
     try {
       const { containers: parsedData, stats: parseStats, vessels: parsedVessels } = await parseExcelFile(file);
-      
       const newBatches: Record<string, Container[]> = {};
       const batchSize = 500;
       
       if (isCloudConnected) {
         alert("Đang tải dữ liệu bãi lên Cloud... Có thể mất vài giây.");
-        
-        // Clear old container data in cloud by deleting all rows in yard_containers table if possible,
-        // or just rely on overriding the IDs. For simplicity we overwrite.
         for (let i = 0; i < parsedData.length; i += batchSize) {
             const chunk = parsedData.slice(i, i + batchSize);
             const batchId = `BATCH-${Math.floor(i / batchSize)}`;
@@ -345,15 +358,9 @@ const App: React.FC = () => {
     const statsMap: Record<string, BlockStats> = {};
     blockConfigs.forEach(block => {
       statsMap[block.name] = {
-        name: block.name,
-        group: block.group || 'GP',
-        capacity: block.capacity || 0,
-        exportFullTeus: 0,
-        importFullTeus: 0,
-        emptyTeus: 0,
-        exportFullCount: 0,
-        importFullCount: 0,
-        emptyCount: 0
+        name: block.name, group: block.group || 'GP', capacity: block.capacity || 0,
+        exportFullTeus: 0, importFullTeus: 0, emptyTeus: 0,
+        exportFullCount: 0, importFullCount: 0, emptyCount: 0
       };
     });
 
@@ -369,10 +376,16 @@ const App: React.FC = () => {
     return Object.values(statsMap);
   }, [containers, blockConfigs]);
 
+  if (!user) {
+    return <LoginForm onLogin={handleLogin} />;
+  }
+
   return (
     <Layout 
       mode={mode} 
       setMode={setMode} 
+      user={user}
+      onLogout={handleLogout}
       isCloudConnected={isCloudConnected}
       onCloudConfig={(config) => setCloudConfig(config)}
     >
@@ -386,7 +399,7 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {mode === 'YARD' && (
+      {mode === 'YARD' && user.role === 'PLANNER' && (
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
           <YardDashboard 
             requests={requests} 
@@ -399,7 +412,7 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {mode === 'VIEWER' && (
+      {mode === 'VIEWER' && user.role === 'PLANNER' && (
         <div className="space-y-6 animate-in fade-in duration-500">
             <div className="flex space-x-2 overflow-x-auto pb-2 scrollbar-hide">
                 {[
