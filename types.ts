@@ -1,5 +1,11 @@
 
 export type ContainerSize = '20' | '40';
+export type UserRole = 'PLANNER' | 'GATE';
+
+export interface User {
+  username: string;
+  role: UserRole;
+}
 
 export interface ContainerRequest {
   id: string;
@@ -39,7 +45,7 @@ export interface YardSuggestion {
   reasoning: string;
   priorityLevel: 'CLUSTER' | 'BERTH' | 'WINDOW' | 'IMPORT_FALLBACK' | 'NONE';
   notFound?: boolean;
-  validationTrace?: string[]; // Nhật ký kiểm tra các vị trí
+  validationTrace?: string[]; 
   reservationId?: string;
 }
 
