@@ -1,17 +1,19 @@
 
 import React, { useRef, useState } from 'react';
-import { AppMode } from '../types';
+import { AppMode, User } from '../types';
 import { CloudConfig } from '../services/supabaseService';
 
 interface LayoutProps {
   children: React.ReactNode;
   mode: AppMode;
   setMode: (mode: AppMode) => void;
+  user: User;
+  onLogout: () => void;
   isCloudConnected: boolean;
   onCloudConfig: (config: CloudConfig) => void;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, mode, setMode, isCloudConnected, onCloudConfig }) => {
+const Layout: React.FC<LayoutProps> = ({ children, mode, setMode, user, onLogout, isCloudConnected, onCloudConfig }) => {
   const [showCloudModal, setShowCloudModal] = useState(false);
   const [cloudInput, setCloudInput] = useState<CloudConfig>(() => {
     const saved = localStorage.getItem('yard_cloud_config_v1');
@@ -35,25 +37,56 @@ const Layout: React.FC<LayoutProps> = ({ children, mode, setMode, isCloudConnect
               </svg>
             </div>
             <div className="hidden sm:block">
-              <h1 className="text-xl font-black text-slate-900 tracking-tighter">PORT CONNECT</h1>
-              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-none">Smart Yard Workflow</p>
+              <h1 className="text-xl font-black text-slate-900 tracking-tighter leading-none">PORT CONNECT</h1>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className="text-[9px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-black uppercase tracking-widest">{user.role}</span>
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Smart Port v2.0</span>
+              </div>
             </div>
           </div>
 
-          <nav className="hidden lg:flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
-            <button onClick={() => setMode('VIEWER')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${mode === 'VIEWER' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>YARD VIEW</button>
-            <button onClick={() => setMode('GATE')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${mode === 'GATE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>GATE TERMINAL</button>
-            <button onClick={() => setMode('YARD')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${mode === 'YARD' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>YARD PLANNING</button>
-          </nav>
+          {/* Navigation - Only for Planner */}
+          {user.role === 'PLANNER' && (
+            <nav className="hidden lg:flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
+              <button onClick={() => setMode('VIEWER')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${mode === 'VIEWER' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>YARD VIEW</button>
+              <button onClick={() => setMode('GATE')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${mode === 'GATE' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>GATE TERMINAL</button>
+              <button onClick={() => setMode('YARD')} className={`px-6 py-2 rounded-xl text-sm font-black transition-all ${mode === 'YARD' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>YARD PLANNING</button>
+            </nav>
+          )}
 
-          <div className="flex items-center gap-4">
+          {/* Gate Terminal Label for Gate User */}
+          {user.role === 'GATE' && (
+            <div className="hidden lg:block">
+              <span className="px-8 py-3 bg-blue-50 text-blue-600 rounded-2xl text-sm font-black uppercase italic tracking-tighter border border-blue-100">
+                Gate Terminal Operations
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-center gap-6">
             <button 
                 onClick={() => setShowCloudModal(true)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isCloudConnected ? 'bg-green-50 text-green-600 border border-green-200' : 'bg-slate-100 text-slate-400 border border-slate-200 hover:bg-blue-50 hover:text-blue-600'}`}
+                className={`hidden md:flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isCloudConnected ? 'bg-green-50 text-green-600 border border-green-200' : 'bg-slate-100 text-slate-400 border border-slate-200 hover:bg-blue-50 hover:text-blue-600'}`}
             >
                 <div className={`w-2 h-2 rounded-full ${isCloudConnected ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`}></div>
                 {isCloudConnected ? 'Cloud Synced' : 'Offline Mode'}
             </button>
+
+            <div className="flex items-center gap-4 pl-6 border-l border-slate-200">
+              <div className="text-right hidden sm:block">
+                <div className="text-xs font-black text-slate-900 uppercase tracking-tighter leading-none">{user.username}</div>
+                <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">{user.role === 'PLANNER' ? 'Administrator' : 'Operator'}</div>
+              </div>
+              <button 
+                onClick={onLogout}
+                className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all border border-slate-100"
+                title="Đăng xuất"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </header>
