@@ -25,12 +25,18 @@ export const syncTable = async (tableName: string, id: string, data: any) => {
   if (error) console.error(`Sync error on ${tableName}:`, error);
 };
 
+// Fix: Supabase type system fails to correctly infer the return type when using ternary operators or variables inside .select().
+// By separating the query into literal paths and using 'as any', we avoid the 'ParserError' and bypass strict schema checks.
 export const fetchTableData = async (tableName: string, returnFullRow: boolean = false) => {
   if (!supabase) return [];
+
+  // Use explicit string literals for select to aid type inference
+  const query = returnFullRow 
+    ? supabase.from(tableName).select('id, data') 
+    : supabase.from(tableName).select('data');
+
   // Increase limit for yard containers to ensure all batches are fetched
-  const { data, error } = await supabase
-    .from(tableName)
-    .select(returnFullRow ? 'id, data' : 'data')
+  const { data, error } = await (query as any)
     .limit(1000)
     .order('updated_at', { ascending: false });
   
@@ -39,8 +45,10 @@ export const fetchTableData = async (tableName: string, returnFullRow: boolean =
     return [];
   }
   
+  if (!data) return [];
+  
   if (returnFullRow) return data;
-  return data.map(item => item.data);
+  return data.map((item: any) => item.data);
 };
 
 export const subscribeToChanges = (tableName: string, callback: (payload: any) => void) => {
