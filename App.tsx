@@ -13,7 +13,7 @@ import Layout from './components/Layout';
 import GateForm from './components/GateForm';
 import YardDashboard from './components/YardDashboard';
 import { startAlarm, stopAlarm } from './services/audioService';
-import { initSupabase, syncTable, fetchTableData, subscribeToChanges, CloudConfig } from './services/supabaseService';
+import { initSupabase, syncTable, fetchTableData, subscribeToChanges, CloudConfig, getSupabase } from './services/supabaseService';
 
 const STORAGE_KEYS = {
   CONTAINERS: 'yard_containers_v1',
@@ -103,9 +103,15 @@ const App: React.FC = () => {
   const [isCloudConnected, setIsCloudConnected] = useState(false);
 
   const [requests, setRequests] = useState<ContainerRequest[]>([]);
-  const [containers, setContainers] = useState<Container[]>([]);
+  // Use a map to store container batches to efficiently handle partial updates
+  const [containerBatches, setContainerBatches] = useState<Record<string, Container[]>>({});
   const [schedule, setSchedule] = useState<ScheduleData[]>([]);
   const [blockConfigs, setBlockConfigs] = useState<BlockConfig[]>(DEFAULT_BLOCKS);
+
+  // Compute flattened containers array from batches
+  const containers = useMemo(() => {
+    return Object.values(containerBatches).flat();
+  }, [containerBatches]);
 
   // Initialize Supabase and Subscriptions
   useEffect(() => {
@@ -123,13 +129,20 @@ const App: React.FC = () => {
           const cloudSchedule = await fetchTableData('yard_schedule');
           if (cloudSchedule.length > 0) setSchedule(cloudSchedule);
           
-          const cloudContainers = await fetchTableData('yard_containers');
-          if (cloudContainers.length > 0) setContainers(cloudContainers);
+          const cloudContainerRows = await fetchTableData('yard_containers', true); // Pass true to get raw rows with IDs
+          if (cloudContainerRows.length > 0) {
+              const batches: Record<string, Container[]> = {};
+              cloudContainerRows.forEach((row: any) => {
+                  batches[row.id] = row.data;
+              });
+              setContainerBatches(batches);
+          }
         };
         loadCloudData();
 
         // Subscriptions
-        const reqSub = subscribeToChanges('yard_requests', (data) => {
+        const reqSub = subscribeToChanges('yard_requests', (payload) => {
+          const data = payload.new.data;
           setRequests(prev => {
             const index = prev.findIndex(r => r.id === data.id);
             if (index > -1) {
@@ -141,7 +154,8 @@ const App: React.FC = () => {
           });
         });
 
-        const schedSub = subscribeToChanges('yard_schedule', (data) => {
+        const schedSub = subscribeToChanges('yard_schedule', (payload) => {
+          const data = payload.new.data;
           setSchedule(prev => {
              const index = prev.findIndex(s => s.vesselName === data.vesselName);
              if (index > -1) {
@@ -153,9 +167,19 @@ const App: React.FC = () => {
           });
         });
 
+        const contSub = subscribeToChanges('yard_containers', (payload) => {
+           const id = payload.new.id;
+           const data = payload.new.data;
+           setContainerBatches(prev => ({
+               ...prev,
+               [id]: data
+           }));
+        });
+
         return () => {
           reqSub?.unsubscribe();
           schedSub?.unsubscribe();
+          contSub?.unsubscribe();
         };
       }
     } else {
@@ -163,7 +187,7 @@ const App: React.FC = () => {
         const r = localStorage.getItem(STORAGE_KEYS.REQUESTS);
         if (r) setRequests(JSON.parse(r));
         const c = localStorage.getItem(STORAGE_KEYS.CONTAINERS);
-        if (c) setContainers(JSON.parse(c));
+        if (c) setContainerBatches({ 'local': JSON.parse(c) });
         const s = localStorage.getItem(STORAGE_KEYS.SCHEDULE);
         if (s) setSchedule(JSON.parse(s));
         const b = localStorage.getItem(STORAGE_KEYS.BLOCK_CONFIGS);
@@ -181,14 +205,15 @@ const App: React.FC = () => {
   const [vessels, setVessels] = useState<string[]>([]);
   const [selectedVessels, setSelectedVessels] = useState<string[]>(['', '', '']);
 
-  // Sync to Cloud/Local
+  // Sync to Local
   useEffect(() => {
     if (!isCloudConnected) {
       localStorage.setItem(STORAGE_KEYS.BLOCK_CONFIGS, JSON.stringify(blockConfigs));
       localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
       localStorage.setItem(STORAGE_KEYS.SCHEDULE, JSON.stringify(schedule));
+      localStorage.setItem(STORAGE_KEYS.CONTAINERS, JSON.stringify(containers));
     }
-  }, [blockConfigs, requests, schedule, isCloudConnected]);
+  }, [blockConfigs, requests, schedule, containers, isCloudConnected]);
 
   // Sync chuông báo động
   useEffect(() => {
@@ -214,11 +239,15 @@ const App: React.FC = () => {
     if (isCloudConnected) syncTable('yard_requests', newRequest.id, newRequest);
   };
 
+  /**
+   * Updates a request with an assigned location.
+   * Explicitly casts 'status' to the union literal type to prevent widening to string.
+   */
   const handleYardAssign = (requestId: string, location: string) => {
     setRequests(prev => {
       const updated = prev.map(req => 
         req.id === requestId 
-          ? { ...req, status: 'assigned', assignedLocation: location, acknowledgedByGate: false } 
+          ? { ...req, status: 'assigned' as const, assignedLocation: location, acknowledgedByGate: false } 
           : req
       );
       const req = updated.find(r => r.id === requestId);
@@ -247,19 +276,28 @@ const App: React.FC = () => {
     setIsLoading(true);
     try {
       const { containers: parsedData, stats: parseStats, vessels: parsedVessels } = await parseExcelFile(file);
-      setContainers(parsedData);
-      setStats(parseStats);
-      setVessels(parsedVessels);
+      
+      const newBatches: Record<string, Container[]> = {};
+      const batchSize = 500;
       
       if (isCloudConnected) {
-        // Only sync a subset or warn user because full yard map can be massive
-        // For now, sync all as requested for "many people to see"
         alert("Đang tải dữ liệu bãi lên Cloud... Có thể mất vài giây.");
-        for (let i = 0; i < parsedData.length; i += 500) {
-            const chunk = parsedData.slice(i, i + 500);
-            await syncTable('yard_containers', `BATCH-${i}`, chunk);
+        
+        // Clear old container data in cloud by deleting all rows in yard_containers table if possible,
+        // or just rely on overriding the IDs. For simplicity we overwrite.
+        for (let i = 0; i < parsedData.length; i += batchSize) {
+            const chunk = parsedData.slice(i, i + batchSize);
+            const batchId = `BATCH-${Math.floor(i / batchSize)}`;
+            newBatches[batchId] = chunk;
+            await syncTable('yard_containers', batchId, chunk);
         }
+      } else {
+        newBatches['local'] = parsedData;
       }
+
+      setContainerBatches(newBatches);
+      setStats(parseStats);
+      setVessels(parsedVessels);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -267,9 +305,17 @@ const App: React.FC = () => {
     }
   };
 
-  const handleClearData = () => {
+  const handleClearData = async () => {
     if (window.confirm('Xóa toàn bộ dữ liệu hiện tại?')) {
-        setContainers([]);
+        if (isCloudConnected) {
+            const sb = getSupabase();
+            if (sb) {
+                await sb.from('yard_containers').delete().neq('id', 'dummy');
+                await sb.from('yard_requests').delete().neq('id', 'dummy');
+                await sb.from('yard_schedule').delete().neq('id', 'dummy');
+            }
+        }
+        setContainerBatches({});
         setRequests([]);
         setSchedule([]);
         localStorage.clear();
@@ -376,12 +422,12 @@ const App: React.FC = () => {
                         <div className="flex-1 w-full">
                             <FileUpload onFileUpload={handleFileUpload} isLoading={isLoading} />
                         </div>
-                        {stats && (
+                        {containers.length > 0 && (
                             <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 text-xs space-y-1">
-                                <div className="font-black text-slate-400 uppercase tracking-widest mb-1">Import Status</div>
+                                <div className="font-black text-slate-400 uppercase tracking-widest mb-1">Status</div>
                                 <div className="flex justify-between gap-8">
-                                    <span className="text-slate-500">Containers:</span>
-                                    <span className="font-bold text-slate-900">{stats.createdContainers.toLocaleString()}</span>
+                                    <span className="text-slate-500">Containers in Yard:</span>
+                                    <span className="font-bold text-slate-900">{containers.length.toLocaleString()}</span>
                                 </div>
                                 <button onClick={handleClearData} className="text-red-500 hover:text-red-700 font-black uppercase text-[9px] mt-2 block tracking-tighter underline">Xóa Dữ Liệu</button>
                             </div>
