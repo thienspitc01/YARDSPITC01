@@ -12,6 +12,7 @@ import Layout from './components/Layout';
 import GateForm from './components/GateForm';
 import YardDashboard from './components/YardDashboard';
 import LoginForm from './components/LoginForm';
+import EmergencyModal from './components/EmergencyModal';
 import { startAlarm, stopAlarm } from './services/audioService';
 import { requestNotificationPermission, sendNotification } from './services/notificationService';
 import { initSupabase, syncTable, fetchTableData, subscribeToChanges, CloudConfig, getSupabase } from './services/supabaseService';
@@ -103,17 +104,14 @@ const App: React.FC = () => {
   });
 
   const [mode, setMode] = useState<AppMode>('VIEWER');
+  const [emergencyAlert, setEmergencyAlert] = useState<{title: string, message: string, type: 'danger' | 'info'} | null>(null);
 
-  // Request Notification Permission on Mount
   useEffect(() => {
     requestNotificationPermission();
   }, []);
 
-  // Sync mode with role: Gate Staff is forced into GATE mode
   useEffect(() => {
-    if (user?.role === 'GATE') {
-      setMode('GATE');
-    }
+    if (user?.role === 'GATE') setMode('GATE');
   }, [user]);
 
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(() => {
@@ -127,11 +125,8 @@ const App: React.FC = () => {
   const [schedule, setSchedule] = useState<ScheduleData[]>([]);
   const [blockConfigs, setBlockConfigs] = useState<BlockConfig[]>(DEFAULT_BLOCKS);
 
-  const containers = useMemo(() => {
-    return Object.values(containerBatches).flat();
-  }, [containerBatches]);
+  const containers = useMemo(() => Object.values(containerBatches).flat(), [containerBatches]);
 
-  // Track the last known count of pending/assigned requests to trigger notifications once
   const lastPendingCount = useRef(0);
   const lastAssignedCount = useRef(0);
 
@@ -153,9 +148,7 @@ const App: React.FC = () => {
           const cloudContainerRows = await fetchTableData('yard_containers', true);
           if (cloudContainerRows.length > 0) {
               const batches: Record<string, Container[]> = {};
-              cloudContainerRows.forEach((row: any) => {
-                  batches[row.id] = row.data;
-              });
+              cloudContainerRows.forEach((row: any) => { batches[row.id] = row.data; });
               setContainerBatches(batches);
           }
         };
@@ -190,10 +183,7 @@ const App: React.FC = () => {
         const contSub = subscribeToChanges('yard_containers', (payload) => {
            const id = payload.new.id;
            const data = payload.new.data;
-           setContainerBatches(prev => ({
-               ...prev,
-               [id]: data
-           }));
+           setContainerBatches(prev => ({ ...prev, [id]: data }));
         });
 
         return () => {
@@ -234,32 +224,59 @@ const App: React.FC = () => {
     }
   }, [blockConfigs, requests, schedule, containers, isCloudConnected]);
 
-  // Alarms & Push Notifications
+  // Alarms & Emergency Push Notifications
   useEffect(() => {
     if (!user) return;
-    let shouldAlarm = false;
     
     const pendingReqs = requests.filter(r => r.status === 'pending' && !r.acknowledgedByYard);
     const assignedReqs = requests.filter(r => r.status === 'assigned' && !r.acknowledgedByGate);
 
-    if (user.role === 'PLANNER' && mode === 'YARD') {
-      shouldAlarm = pendingReqs.length > 0;
+    if (user.role === 'PLANNER' && (mode === 'YARD' || mode === 'VIEWER')) {
       if (pendingReqs.length > lastPendingCount.current) {
-        sendNotification("Có yêu cầu xin vị trí mới!", `Bạn có ${pendingReqs.length} container đang chờ cấp vị trí.`);
+        const title = "CẢNH BÁO: CÓ XE XIN VỊ TRÍ!";
+        const message = `Bạn có ${pendingReqs.length} yêu cầu mới cần xử lý ngay lập tức!`;
+        setEmergencyAlert({ title, message, type: 'danger' });
+        sendNotification(title, message, () => {
+          window.focus();
+        });
+        startAlarm();
+      } else if (pendingReqs.length === 0) {
+        setEmergencyAlert(null);
+        stopAlarm();
       }
     } else if (user.role === 'GATE' || mode === 'GATE') {
-      shouldAlarm = assignedReqs.length > 0;
       if (assignedReqs.length > lastAssignedCount.current) {
         const lastAssigned = assignedReqs[assignedReqs.length - 1];
-        sendNotification("Đã có vị trí hạ bãi!", `Container tàu ${lastAssigned.vesselName} hạ tại ${lastAssigned.assignedLocation}`);
+        const title = "THÔNG BÁO: ĐÃ CÓ VỊ TRÍ HẠ BÃI!";
+        const message = `Container tàu ${lastAssigned.vesselName} hạ tại ${lastAssigned.assignedLocation}`;
+        setEmergencyAlert({ title, message, type: 'info' });
+        sendNotification(title, message, () => {
+          window.focus();
+        });
+        startAlarm();
+      } else if (assignedReqs.length === 0) {
+        setEmergencyAlert(null);
+        stopAlarm();
       }
     }
 
     lastPendingCount.current = pendingReqs.length;
     lastAssignedCount.current = assignedReqs.length;
-
-    if (shouldAlarm) startAlarm(); else stopAlarm();
   }, [requests, mode, user]);
+
+  const handleEmergencyAcknowledge = () => {
+    const pendingReqs = requests.filter(r => r.status === 'pending' && !r.acknowledgedByYard);
+    const assignedReqs = requests.filter(r => r.status === 'assigned' && !r.acknowledgedByGate);
+
+    if (user?.role === 'PLANNER') {
+      pendingReqs.forEach(req => handleAcknowledge(req.id, 'yard'));
+    } else {
+      assignedReqs.forEach(req => handleAcknowledge(req.id, 'gate'));
+    }
+    
+    setEmergencyAlert(null);
+    stopAlarm();
+  };
 
   const handleLogin = (newUser: User) => {
     setUser(newUser);
@@ -401,9 +418,7 @@ const App: React.FC = () => {
     return Object.values(statsMap);
   }, [containers, blockConfigs]);
 
-  if (!user) {
-    return <LoginForm onLogin={handleLogin} />;
-  }
+  if (!user) return <LoginForm onLogin={handleLogin} />;
 
   return (
     <Layout 
@@ -414,6 +429,16 @@ const App: React.FC = () => {
       isCloudConnected={isCloudConnected}
       onCloudConfig={(config) => setCloudConfig(config)}
     >
+      {/* Emergency Modal Overlay */}
+      {emergencyAlert && (
+        <EmergencyModal 
+          title={emergencyAlert.title} 
+          message={emergencyAlert.message} 
+          type={emergencyAlert.type}
+          onAcknowledge={handleEmergencyAcknowledge} 
+        />
+      )}
+
       {mode === 'GATE' && (
         <div className="space-y-12 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <div className="text-center space-y-2">
