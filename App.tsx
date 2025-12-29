@@ -155,6 +155,10 @@ const App: React.FC = () => {
         loadCloudData();
 
         const reqSub = subscribeToChanges('yard_requests', (payload) => {
+          if (payload.eventType === 'DELETE') {
+             setRequests(prev => prev.filter(r => r.id !== payload.old.id));
+             return;
+          }
           const data = payload.new.data;
           setRequests(prev => {
             const index = prev.findIndex(r => r.id === data.id);
@@ -168,6 +172,11 @@ const App: React.FC = () => {
         });
 
         const schedSub = subscribeToChanges('yard_schedule', (payload) => {
+          if (payload.eventType === 'DELETE') {
+             // If a deletion happens, we might need a full refresh or partial update
+             // But for our "purge all" logic, deletions are handled during the upload phase
+             return;
+          }
           const data = payload.new.data;
           setSchedule(prev => {
              const index = prev.findIndex(s => s.vesselName === data.vesselName);
@@ -181,6 +190,7 @@ const App: React.FC = () => {
         });
 
         const contSub = subscribeToChanges('yard_containers', (payload) => {
+           if (payload.eventType === 'DELETE') return;
            const id = payload.new.id;
            const data = payload.new.data;
            setContainerBatches(prev => ({ ...prev, [id]: data }));
@@ -335,11 +345,20 @@ const App: React.FC = () => {
     setIsLoading(true);
     try {
       const { containers: parsedData, stats: parseStats, vessels: parsedVessels } = await parseExcelFile(file);
+      
+      if (isCloudConnected) {
+        const sb = getSupabase();
+        if (sb) {
+            alert("Đang xóa dữ liệu cũ trên Cloud...");
+            await sb.from('yard_containers').delete().neq('id', 'purging-id');
+        }
+      }
+
       const newBatches: Record<string, Container[]> = {};
       const batchSize = 500;
       
       if (isCloudConnected) {
-        alert("Đang tải dữ liệu bãi lên Cloud... Có thể mất vài giây.");
+        alert("Đang tải dữ liệu bãi mới lên Cloud... Có thể mất vài giây.");
         for (let i = 0; i < parsedData.length; i += batchSize) {
             const chunk = parsedData.slice(i, i + batchSize);
             const batchId = `BATCH-${Math.floor(i / batchSize)}`;
@@ -358,6 +377,21 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Logic to completely replace schedule
+  const handleScheduleUpdate = async (newSchedule: ScheduleData[]) => {
+      if (isCloudConnected) {
+          const sb = getSupabase();
+          if (sb) {
+              await sb.from('yard_schedule').delete().neq('id', 'purging-id');
+          }
+          // Push each new schedule item
+          for (const item of newSchedule) {
+              await syncTable('yard_schedule', item.vesselName, item);
+          }
+      }
+      setSchedule(newSchedule);
   };
 
   const handleClearData = async () => {
@@ -429,7 +463,6 @@ const App: React.FC = () => {
       isCloudConnected={isCloudConnected}
       onCloudConfig={(config) => setCloudConfig(config)}
     >
-      {/* Emergency Modal Overlay */}
       {emergencyAlert && (
         <EmergencyModal 
           title={emergencyAlert.title} 
@@ -521,7 +554,16 @@ const App: React.FC = () => {
             )}
 
             {view === 'stats' && <YardStatistics data={processedStats} containers={containers} blocks={blockConfigs} isoTypeFilter={isoTypeFilter} onFilterChange={setIsoTypeFilter} />}
-            {view === 'vessel_stats' && <VesselStatistics containers={containers} vessels={vessels} blocks={blockConfigs} onSelectVessels={setSelectedVessels} />}
+            {view === 'vessel_stats' && (
+                <VesselStatistics 
+                    containers={containers} 
+                    vessels={vessels} 
+                    blocks={blockConfigs} 
+                    onSelectVessels={setSelectedVessels}
+                    scheduleData={schedule}
+                    onScheduleUpdate={handleScheduleUpdate}
+                />
+            )}
             {view === 'dwell_stats' && <DwellTimeStatistics containers={containers} />}
         </div>
       )}
